@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────
+#  TradingView Algo Bot – Configuration
+# ─────────────────────────────────────────────
+
+# Broker to use: "tradovate" or "ibkr"
+broker: tradovate
+
+# Set to true to trade the demo/paper account
+paper_trading: true
+
+# Webhook server
+webhook:
+  host: 0.0.0.0
+  port: 8000
+  # Secret token TradingView must send in the Authorization header
+  # Set this to any random string and put the same value in your TV alert webhook URL:
+  # e.g.  https://your-server.com/webhook?token=YOUR_SECRET
+  secret_token: "CHANGE_ME"
+
+# Per-instrument settings
+# symbol: must match exactly what TradingView sends in the alert JSON
+instruments:
+  NQ:
+    # Full contract symbol on your broker (Tradovate: "NQM5", IBKR: "NQ")
+    broker_symbol: NQ
+    exchange: CME
+    currency: USD
+    # Number of contracts per signal
+    quantity: 1
+    # Trailing stop distance in POINTS (not ticks)
+    # NQ: 1 point = 4 ticks = $20
+    trail_points: 20
+    # Optional: hard max loss per trade in USD (0 = disabled)
+    max_loss_usd: 500
+
+  GC:
+    broker_symbol: GC
+    exchange: COMEX
+    currency: USD
+    quantity: 1
+    # Gold: 1 point = $100
+    trail_points: 5
+    max_loss_usd: 500
+
+  RTY:
+    broker_symbol: RTY
+    exchange: CME
+    currency: USD
+    quantity: 1
+    # RTY: 1 point = $50
+    trail_points: 10
+    max_loss_usd: 500
+
+  YM:
+    broker_symbol: YM
+    exchange: CBOT
+    currency: USD
+    quantity: 1
+    # YM: 1 point = $5
+    trail_points: 50
+    max_loss_usd: 500
