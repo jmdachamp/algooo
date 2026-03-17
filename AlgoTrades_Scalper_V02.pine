@@ -1,0 +1,263 @@
+//@version=6
+strategy("AlgoTrades Scalper V0.2 - Tick-Based Stops", overlay=true, fill_orders_on_standard_ohlc=true)
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+// EMA Settings
+GRP_EMA = "EMA Settings"
+i_emaFast  = input.int(9,  title="Fast EMA",  minval=1, group=GRP_EMA)
+i_emaMid   = input.int(21, title="Mid EMA",   minval=1, group=GRP_EMA)
+i_emaSlow  = input.int(45, title="Slow EMA",  minval=1, group=GRP_EMA)
+
+// Volume Settings
+GRP_VOL = "Volume Settings"
+i_volumePeriod   = input.int(20,    title="Volume SMA Period",          minval=5,          group=GRP_VOL)
+i_volumeIncrease = input.float(1.05, title="Volume Increase Multiplier", minval=1.0, step=0.05, group=GRP_VOL)
+
+// Stop Loss & Risk Settings
+GRP_RISK = "Stop Loss & Risk Settings"
+i_stopLossTicks = input.int(15,   title="Stop Loss in Ticks",          minval=5,           group=GRP_RISK)
+i_riskReward    = input.float(2.0, title="Final Target Risk/Reward Ratio", minval=1.0, step=0.1, group=GRP_RISK)
+
+// EMA Crossover / ATR Settings
+GRP_CROSS = "EMA Crossover Settings"
+i_enableCrossovers = input.bool(true,  title="Enable EMA Crossover Entries",  group=GRP_CROSS)
+i_atrMultiplier    = input.float(1.1,  title="ATR Confirmation Multiplier",    minval=1.0, step=0.1, group=GRP_CROSS)
+i_atrPeriod        = input.int(10,     title="ATR Comparison Period",          minval=5,   group=GRP_CROSS)
+i_trailTicks       = input.int(10,     title="Trailing Stop Distance (Ticks)", minval=5,   group=GRP_CROSS)
+
+// Exit Management Settings
+GRP_EXIT = "Exit Management"
+i_enablePartials  = input.bool(true,  title="Enable Partial Profit Taking",   group=GRP_EXIT)
+i_partial1Percent = input.int(50,     title="First Partial % of Position",    minval=25, maxval=75, group=GRP_EXIT)
+i_partial1RR      = input.float(1.0,  title="First Partial R:R Ratio",        minval=0.5, step=0.25, group=GRP_EXIT)
+i_enableBreakeven = input.bool(true,  title="Move to Breakeven",              group=GRP_EXIT)
+i_breakevenRR     = input.float(0.75, title="Breakeven at R:R",               minval=0.25, step=0.25, group=GRP_EXIT)
+i_enableTrailing  = input.bool(true,  title="Enable Trailing Stop",           group=GRP_EXIT)
+i_trailStartRR    = input.float(1.0,  title="Start Trailing at R:R",          minval=0.5, step=0.25, group=GRP_EXIT)
+
+// Session & Time Settings
+GRP_TIME = "Time Settings"
+i_sessionTime  = input.session("0930-1550", title="Trading Session",                      group=GRP_TIME)
+i_filterLunch  = input.bool(true,           title="Filter Lunch (12:15-1:15)",             group=GRP_TIME)
+i_primeTimeOnly = input.bool(false,         title="Prime Time Only (9:45-11:30 + 1:30-3:30)", group=GRP_TIME)
+i_maxBarsOpen  = input.int(15,              title="Max Bars to Hold Position",  minval=5,  group=GRP_TIME)
+
+// ============================================================
+// CALCULATIONS
+// ============================================================
+
+atr      = ta.atr(14)
+emaFast  = ta.ema(close, i_emaFast)
+emaMid   = ta.ema(close, i_emaMid)
+emaSlow  = ta.ema(close, i_emaSlow)
+
+stopLossDistance = i_stopLossTicks * syminfo.mintick
+trailDistance    = i_trailTicks    * syminfo.mintick
+
+volumeSMA = ta.sma(volume, i_volumePeriod)
+volumeUp  = volume > volumeSMA * i_volumeIncrease
+
+// Session / time filters
+inSession = not na(time(timeframe.period, i_sessionTime))
+lunchTime = i_filterLunch and ((hour == 12 and minute >= 15) or (hour == 13 and minute <= 15))
+primeTime = not i_primeTimeOnly or
+     ((hour == 9 and minute >= 45) or hour == 10 or (hour == 11 and minute <= 30) or
+      (hour == 13 and minute >= 30) or hour == 14 or (hour == 15 and minute <= 30))
+goodTime  = inSession and not lunchTime and primeTime
+
+// ============================================================
+// TREND & EMA CONDITIONS
+// ============================================================
+
+bullTrend = emaFast > emaMid and emaMid > emaSlow and emaFast > emaFast[2] and emaMid > emaMid[2]
+bearTrend = emaFast < emaMid and emaMid < emaSlow and emaFast < emaFast[2] and emaMid < emaMid[2]
+
+// ============================================================
+// ATR MOMENTUM CONFIRMATION
+// ============================================================
+
+atrConfirmation = atr > i_atrMultiplier * ta.ema(atr, i_atrPeriod)
+
+// ============================================================
+// ENTRY SIGNALS
+// ============================================================
+
+// Classic crossovers
+longCrossover  = i_enableCrossovers and ta.crossover(emaFast, emaMid)  and emaFast > emaSlow and atrConfirmation
+shortCrossover = i_enableCrossovers and ta.crossunder(emaFast, emaMid) and emaFast < emaSlow and atrConfirmation
+
+// EMA alignment (diverging stack)
+emaAlignmentLong  = i_enableCrossovers and emaFast > emaMid and emaMid >= emaSlow and
+     (emaFast - emaMid) > (emaFast[1] - emaMid[1]) * 1.1
+emaAlignmentShort = i_enableCrossovers and emaFast < emaMid and emaMid <= emaSlow and
+     (emaMid - emaFast) > (emaMid[1] - emaFast[1]) * 1.1
+
+// Combined entry gates (volume + time required)
+longSignal  = goodTime and volumeUp and strategy.position_size == 0 and (longCrossover  or emaAlignmentLong)
+shortSignal = goodTime and volumeUp and strategy.position_size == 0 and (shortCrossover or emaAlignmentShort)
+
+// ============================================================
+// TRADE STATE VARIABLES
+// ============================================================
+
+var float entryPrice     = na
+var float initialStop    = na
+var float finalTarget    = na
+var float partial1Target = na
+var bool  partial1Taken  = false
+var bool  breakevenMoved = false
+var bool  isTrailing     = false
+var float trailingStop   = na
+var int   barsInTrade    = 0
+
+// Bar counter
+if strategy.position_size != 0
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+// ============================================================
+// ENTRIES  ← GREEN / RED ARROWS FIRE HERE
+// ============================================================
+
+if longSignal
+    entryPrice     := close
+    initialStop    := close - stopLossDistance
+    finalTarget    := close + stopLossDistance * i_riskReward
+    partial1Target := close + stopLossDistance * i_partial1RR
+    partial1Taken  := false
+    breakevenMoved := false
+    isTrailing     := false
+    trailingStop   := close - stopLossDistance
+
+    strategy.entry("LONG", strategy.long, comment="L_Cross")
+    strategy.exit("LONG_EXIT", "LONG", stop=initialStop, limit=finalTarget)
+
+if shortSignal
+    entryPrice     := close
+    initialStop    := close + stopLossDistance
+    finalTarget    := close - stopLossDistance * i_riskReward
+    partial1Target := close - stopLossDistance * i_partial1RR
+    partial1Taken  := false
+    breakevenMoved := false
+    isTrailing     := false
+    trailingStop   := close + stopLossDistance
+
+    strategy.entry("SHORT", strategy.short, comment="S_Cross")
+    strategy.exit("SHORT_EXIT", "SHORT", stop=initialStop, limit=finalTarget)
+
+// ============================================================
+// EXIT MANAGEMENT
+// ============================================================
+
+if strategy.position_size != 0 and not na(entryPrice)
+
+    // ── LONG position ─────────────────────────────────────
+    if strategy.position_size > 0
+        currentRR = (close - entryPrice) / stopLossDistance
+
+        // 1. Partial profit at 1R  (default: close 50% of position)
+        if i_enablePartials and not partial1Taken and close >= partial1Target
+            strategy.close("LONG", qty_percent=i_partial1Percent, comment="L_Partial")
+            partial1Taken := true
+
+        // 2. Move stop to breakeven at 0.75R
+        if i_enableBreakeven and not breakevenMoved and currentRR >= i_breakevenRR and not isTrailing
+            strategy.exit("LONG_BE", "LONG", stop=entryPrice + syminfo.mintick, limit=finalTarget)
+            breakevenMoved := true
+
+        // 3. Trailing stop from 1R – ratchets up, never down
+        if i_enableTrailing and currentRR >= i_trailStartRR
+            newTrail = close - trailDistance
+            if not isTrailing or newTrail > trailingStop
+                trailingStop := newTrail
+                isTrailing   := true
+                strategy.exit("LONG_TRAIL", "LONG", stop=trailingStop)
+
+    // ── SHORT position ────────────────────────────────────
+    else if strategy.position_size < 0
+        currentRR = (entryPrice - close) / stopLossDistance
+
+        // 1. Partial profit at 1R
+        if i_enablePartials and not partial1Taken and close <= partial1Target
+            strategy.close("SHORT", qty_percent=i_partial1Percent, comment="S_Partial")
+            partial1Taken := true
+
+        // 2. Move stop to breakeven at 0.75R
+        if i_enableBreakeven and not breakevenMoved and currentRR >= i_breakevenRR and not isTrailing
+            strategy.exit("SHORT_BE", "SHORT", stop=entryPrice - syminfo.mintick, limit=finalTarget)
+            breakevenMoved := true
+
+        // 3. Trailing stop from 1R – ratchets down, never up
+        if i_enableTrailing and currentRR >= i_trailStartRR
+            newTrail = close + trailDistance
+            if not isTrailing or newTrail < trailingStop
+                trailingStop := newTrail
+                isTrailing   := true
+                strategy.exit("SHORT_TRAIL", "SHORT", stop=trailingStop)
+
+// ============================================================
+// ADDITIONAL EXITS
+// ============================================================
+
+// Max bars time stop
+if strategy.position_size != 0 and barsInTrade >= i_maxBarsOpen
+    strategy.close_all(comment="Max_Bars")
+
+// EMA trend-reversal exit
+if strategy.position_size > 0  and (ta.crossunder(emaFast, emaMid) or close < emaMid)
+    strategy.close("LONG",  comment="Trend_Reversal")
+
+if strategy.position_size < 0 and (ta.crossover(emaFast, emaMid)  or close > emaMid)
+    strategy.close("SHORT", comment="Trend_Reversal")
+
+// Reset state when flat
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryPrice     := na
+    partial1Taken  := false
+    breakevenMoved := false
+    isTrailing     := false
+    trailingStop   := na
+
+// ============================================================
+// PLOTS
+// ============================================================
+
+// EMAs
+plot(emaFast, "9 EMA",  color.orange, 2)
+plot(emaMid,  "21 EMA", color.aqua,   2)
+plot(emaSlow, "45 EMA", color.purple, 2)
+
+// ── GREEN ARROW  = Long entry signal ──────────────────────
+plotshape(
+     longSignal,
+     title     = "Long Entry (Green Arrow)",
+     style     = shape.arrowup,
+     location  = location.belowbar,
+     color     = color.new(color.lime, 0),
+     size      = size.normal,
+     text      = "L",
+     textcolor = color.white)
+
+// ── RED ARROW  = Short entry signal ───────────────────────
+plotshape(
+     shortSignal,
+     title     = "Short Entry (Red Arrow)",
+     style     = shape.arrowdown,
+     location  = location.abovebar,
+     color     = color.new(color.red, 0),
+     size      = size.normal,
+     text      = "S",
+     textcolor = color.white)
+
+// Stop / target levels while in trade
+plot(strategy.position_size != 0 ? initialStop    : na, "Initial Stop",   color.red,    1, plot.style_linebr)
+plot(strategy.position_size != 0 ? finalTarget    : na, "Final Target",   color.green,  1, plot.style_linebr)
+plot(strategy.position_size != 0 ? partial1Target : na, "Partial Target", color.yellow, 1, plot.style_linebr)
+plot(strategy.position_size != 0 and isTrailing   ? trailingStop : na, "Trailing Stop", color.fuchsia, 1, plot.style_linebr)
+
+// Trend background tint
+bgcolor(bullTrend ? color.new(color.green, 97) : bearTrend ? color.new(color.red, 97) : na, title="Trend Background")
